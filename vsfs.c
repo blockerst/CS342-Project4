@@ -7,10 +7,41 @@
 #include <fcntl.h>
 #include "vsfs.h"
 
+struct superblock {
+    int blockSize;
+    int blockCount;
+    int freeBlockCount;
+    int reservedBlockCount;
+    int firstFreeBlock;
+    int directoryEntryCount;
+    int FATEntryCount;
+    int firstFreeDirectoryEntry;
+    int firstFreeFATEntry;
+};
+
+struct FATentry{
+    int next;
+};
+
+struct directoryEntry{
+    char filename[31];
+    int size;
+    int firstBlock;
+    char padding[89];
+};
+
+struct openFileEntry{
+    char filename[31];
+    char mode;
+    int position;
+};
 
 // globals  =======================================
 int vs_fd; // file descriptor of the Linux file that acts as virtual disk.
-              // this is not visible to an application.
+// Global structures for the superblock, FAT table, and root directory
+struct superblock sb;
+struct FATentry *fat = NULL;
+struct directoryEntry *root = NULL;
 // ========================================================
 
 
