@@ -8,6 +8,7 @@
 #include "vsfs.h"
 
 #define MAX_OPEN_FILES 16
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
 struct superblock {
     int blockSize;
@@ -107,8 +108,14 @@ int vsformat (char *vdiskname, unsigned int m)
         return -1;
     }
 
-    // Initialize and write the FAT to the virtual disk
-    struct FATentry fat[sb.FATEntryCount];
+    // write the FAT to the virt
+    //Allocate memory for the FAT and write it to the virtual disk
+    fat = malloc(sb.FATEntryCount * sizeof(*fat));
+    if (fat == NULL) {
+        printf("Error: Unable to allocate memory for FAT\n");
+        return -1;
+    }
+    
     for (int i = 0; i < sb.FATEntryCount; i++) {
         fat[i].next = -1;
     }
@@ -143,14 +150,14 @@ int vsformat (char *vdiskname, unsigned int m)
 int  vsmount (char *vdiskname)
 {
     // Open the virtual disk file
-    vs_fd = open(vdiskname, O_RDWR);
-    if (vs_fd == -1) {
+    FILE* file = open(vdiskname, O_RDWR);
+    if (file == -1) {
         printf("Error: Unable to open virtual disk file %s\n", vdiskname);
         return -1;
     }
 
     // Load the superblock from disk into memory
-    if (read(vs_fd, &sb, sizeof(sb)) != sizeof(sb)) {
+    if (read(file, &sb, sizeof(sb)) != sizeof(sb)) {
         printf("Error: Unable to read superblock from disk\n");
         return -1;
     }
@@ -161,7 +168,7 @@ int  vsmount (char *vdiskname)
         printf("Error: Unable to allocate memory for FAT\n");
         return -1;
     }
-    if (pread(vs_fd, fat, sb.FATEntryCount * sizeof(*fat), sb.blockSize) != sb.FATEntryCount * sizeof(*fat)) {
+    if (pread(file, fat, sb.FATEntryCount * sizeof(*fat), sb.blockSize) != sb.FATEntryCount * sizeof(*fat)) {
         printf("Error: Unable to read FAT from disk\n");
         return -1;
     }
@@ -172,7 +179,7 @@ int  vsmount (char *vdiskname)
         printf("Error: Unable to allocate memory for root directory\n");
         return -1;
     }
-    if (pread(vs_fd, root, sb.directoryEntryCount * sizeof(*root), sb.blockSize * (sb.firstFreeFATEntry + 1)) != sb.directoryEntryCount * sizeof(*root)) {
+    if (pread(file, root, sb.directoryEntryCount * sizeof(*root), sb.blockSize * (sb.firstFreeFATEntry + 1)) != sb.directoryEntryCount * sizeof(*root)) {
         printf("Error: Unable to read root directory from disk\n");
         return -1;
     }
@@ -183,38 +190,19 @@ int  vsmount (char *vdiskname)
 
 // this function is partially implemented.
 int vsumount(){
-    // Write the superblock from memory back to disk
-    if (write(vs_fd, &sb, sizeof(sb)) != sizeof(sb)) {
-        printf("Error: Unable to write superblock to disk\n");
-        return -1;
-    }
-
-    // Write the FAT from memory back to disk
-    if (pwrite(vs_fd, fat, sb.FATEntryCount * sizeof(*fat), sb.blockSize) != sb.FATEntryCount * sizeof(*fat)) {
-        printf("Error: Unable to write FAT to disk\n");
-        return -1;
-    }
-
-    // Write the root directory from memory back to disk
-    if (pwrite(vs_fd, root, sb.directoryEntryCount * sizeof(*root), sb.blockSize * (sb.firstFreeFATEntry + 1)) != sb.directoryEntryCount * sizeof(*root)) {
-        printf("Error: Unable to write root directory to disk\n");
-        return -1;
-    }
-
-    // Free the memory allocated for the FAT and root directory
-    free(fat);
-    free(root);
-
-    // Close the virtual disk file
-    if (close(vs_fd) == -1) {
-        printf("Error: Unable to close virtual disk file\n");
-        return -1;
-    }
-
-    return 0;
+    // write superblock to virtual disk file
+    write(vs_fd, &sb, sizeof(sb));
+    // write FAT to virtual disk file
+    write(vs_fd, fat, sb.FATEntryCount * sizeof(*fat));
+    // write root directory to virtual disk file
+    write(vs_fd, root, sb.directoryEntryCount * sizeof(*root));
+    
+    fsync (vs_fd); // synchronize kernel file cache with the disk
+    close (vs_fd);
+    return (0);
 }
 
-int vscreate(char *filename, int size){
+int vscreate(char *filename){
     // Check if file already exists
     for (int i = 0; i < sb.directoryEntryCount; i++) {
         if (strcmp(root[i].filename, filename) == 0) {
@@ -353,13 +341,13 @@ int vsread(int fd, void *buf, int n){
     char blockData[sb.blockSize];
     while (bytesRead < n && block != -1) {
         read_block(block, blockData);
-        int bytesToRead = min(n - bytesRead, sb.blockSize - openFiles[fd].position);
+        int bytesToRead = MIN(n - bytesRead, sb.blockSize - openFiles[fd].position);
         memcpy(buf + bytesRead, blockData + openFiles[fd].position, bytesToRead);
         bytesRead += bytesToRead;
         openFiles[fd].position += bytesToRead;
         if (openFiles[fd].position == sb.blockSize) {
             openFiles[fd].position = 0;
-            block = fat[block];
+            block = fat[block].next;
         }
     }
 
@@ -402,20 +390,22 @@ int vsappend(int fd, void *buf, int n)
     char blockData[sb.blockSize];
     while (bytesWritten < n) {
         if (block == -1 || openFiles[fd].position == sb.blockSize) {
-            int newBlock = find_free_block();
+            //Assign a new block to the file
+            int newBlock = sb.firstFreeBlock;
             if (newBlock == -1) {
                 printf("Error: No free blocks\n");
                 break;
             }
             if (block != -1) {
-                fat[block] = newBlock;
+                fat[block].next = newBlock;
             } else {
                 root[directoryEntry].firstBlock = newBlock;
             }
             block = newBlock;
             openFiles[fd].position = 0;
+            sb.firstFreeBlock = fat[newBlock].next;
         }
-        int bytesToWrite = min(n - bytesWritten, sb.blockSize - openFiles[fd].position);
+        int bytesToWrite = MIN(n - bytesWritten, sb.blockSize - openFiles[fd].position);
         memcpy(blockData + openFiles[fd].position, buf + bytesWritten, bytesToWrite);
         write_block(block, blockData);
         bytesWritten += bytesToWrite;
@@ -454,8 +444,8 @@ int vsdelete(char *filename)
     // Free the blocks used by the file
     int block = root[directoryEntry].firstBlock;
     while (block != -1) {
-        int nextBlock = fat[block];
-        fat[block] = -1;
+        int nextBlock = fat[block].next;
+        fat[block].next = -1;
         block = nextBlock;
     }
 
