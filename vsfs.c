@@ -89,116 +89,196 @@ int write_block (void *block, int k)
    The following functions are to be called by applications directly. 
 ***********************************************************************/
 
-int vsformat (char *vdiskname, unsigned int m)
+int vsformat(char *vdiskname, unsigned int m)
 {
     char command[1000];
     int size;
+    int num = 1;
     int count;
-    size  = 1 << m;
+    size = num << m;
     count = size / BLOCKSIZE;
-    //    printf ("%d %d", m, size);
-    sprintf (command, "dd if=/dev/zero of=%s bs=%d count=%d",
-             vdiskname, BLOCKSIZE, count);
-    printf ("executing command = %s\n", command);
-    system (command);
 
-    // Write the superblock to the virtual disk
-    if (write(vs_fd, &sb, sizeof(sb)) != sizeof(sb)) {
-        perror("Error writing superblock to virtual disk");
+    // Open the virtual disk file
+    vs_fd = open(vdiskname, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    if (vs_fd == -1)
+    {
+        perror("Error opening/creating virtual disk");
         return -1;
     }
 
-    // write the FAT to the virt
-    //Allocate memory for the FAT and write it to the virtual disk
-    fat = malloc(sb.FATEntryCount * sizeof(*fat));
-    if (fat == NULL) {
-        printf("Error: Unable to allocate memory for FAT\n");
+    // Set the file size to the desired size
+    if (ftruncate(vs_fd, size) == -1)
+    {
+        perror("Error truncating virtual disk");
+        close(vs_fd);
         return -1;
     }
-    
-    for (int i = 0; i < sb.FATEntryCount; i++) {
+
+    // Allocate memory for superblock, FAT, and root directory
+    fat = malloc(count * sizeof(*fat));
+    root = malloc(128 * sizeof(*root)); // Assuming 128 entries in the root directory
+
+    // Initialize the superblock and other structures
+    sb.blockSize = BLOCKSIZE;
+    sb.blockCount = count;
+    sb.freeBlockCount = count - 1; // One block is reserved for superblock
+    sb.reservedBlockCount = 1;
+    sb.firstFreeBlock = 1;
+    sb.directoryEntryCount = 0;
+    sb.FATEntryCount = count;
+    sb.firstFreeDirectoryEntry = 0;
+    sb.firstFreeFATEntry = 1;
+
+    // Initialize the FAT table
+    for (int i = 0; i < count; i++)
+    {
         fat[i].next = -1;
     }
-    if (write(vs_fd, fat, sizeof(fat)) != sizeof(fat)) {
-        perror("Error writing FAT to virtual disk");
-        return -1;
-    }
 
-    // Initialize and write the root directory to the virtual disk
-    struct directoryEntry root[128];
-    for (int i = 0; i < 128; i++) {
+    // Initialize the root directory
+    for (int i = 0; i < 128; i++)
+    {
         root[i].filename[0] = '\0';
         root[i].size = 0;
         root[i].firstBlock = -1;
     }
-    if (write(vs_fd, root, sizeof(root)) != sizeof(root)) {
+
+    // Write the superblock to the virtual disk file
+    if (write_block(&sb, 0) == -1)
+    {
+        perror("Error writing superblock to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
+        return -1;
+    }
+
+    // Write the FAT table to the virtual disk file
+    if (write_block(fat, 1) == -1)
+    {
+        perror("Error writing FAT to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
+        return -1;
+    }
+
+    // Write the root directory to the virtual disk file
+    if (write_block(root, 2) == -1)
+    {
         perror("Error writing root directory to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
         return -1;
     }
 
     // Close the virtual disk file
-    if (close(vs_fd) == -1) {
-        perror("Error closing virtual disk file");
-        return -1;
-    }
+    close(vs_fd);
+
+    // Free memory
+    free(fat);
+    free(root);
 
     return 0;
 }
 
-
-// this function is partially implemented.
-int  vsmount (char *vdiskname)
+int vsmount(char *vdiskname)
 {
-    // Open the virtual disk file
-    FILE* file = open(vdiskname, O_RDWR);
-    if (file == -1) {
-        printf("Error: Unable to open virtual disk file %s\n", vdiskname);
+    // Get the file descriptor of the virtual disk
+    vs_fd = open(vdiskname, O_RDWR);
+    if (vs_fd == -1)
+    {
+        perror("Error opening virtual disk");
         return -1;
     }
 
-    // Load the superblock from disk into memory
-    if (read(file, &sb, sizeof(sb)) != sizeof(sb)) {
-        printf("Error: Unable to read superblock from disk\n");
+    // Read the superblock from the virtual disk file
+    if (read_block(&sb, 0) == -1)
+    {
+        perror("Error reading superblock from virtual disk");
+        close(vs_fd);
         return -1;
     }
 
-    // Allocate memory for the FAT and read it from the disk
+    //Allocate memory for superblock, FAT, and root directory
     fat = malloc(sb.FATEntryCount * sizeof(*fat));
-    if (fat == NULL) {
-        printf("Error: Unable to allocate memory for FAT\n");
-        return -1;
-    }
-    if (pread(file, fat, sb.FATEntryCount * sizeof(*fat), sb.blockSize) != sb.FATEntryCount * sizeof(*fat)) {
-        printf("Error: Unable to read FAT from disk\n");
+    root = malloc(sb.directoryEntryCount * sizeof(*root));
+    if (fat == NULL || root == NULL) {
+        perror("Error allocating memory");
+        close(vs_fd);
         return -1;
     }
 
-    // Allocate memory for the root directory and read it from the disk
-    root = malloc(sb.directoryEntryCount * sizeof(*root));
-    if (root == NULL) {
-        printf("Error: Unable to allocate memory for root directory\n");
+    // Read the FAT table from the virtual disk file
+    if (read_block(fat, 1) == -1)
+    {
+        perror("Error reading FAT from virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
         return -1;
     }
-    if (pread(file, root, sb.directoryEntryCount * sizeof(*root), sb.blockSize * (sb.firstFreeFATEntry + 1)) != sb.directoryEntryCount * sizeof(*root)) {
-        printf("Error: Unable to read root directory from disk\n");
+
+    // Read the root directory from the virtual disk file
+    if (read_block(root, 2) == -1)
+    {
+        perror("Error reading root directory from virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
         return -1;
+    }
+
+    // Initialize the open file table
+    for (int i = 0; i < MAX_OPEN_FILES; i++)
+    {
+        openFiles[i].filename[0] = '\0';
+        openFiles[i].mode = MODE_READ;
+        openFiles[i].position = 0;
     }
 
     return 0;
 }
-
 
 // this function is partially implemented.
 int vsumount(){
-    // write superblock to virtual disk file
-    write(vs_fd, &sb, sizeof(sb));
-    // write FAT to virtual disk file
-    write(vs_fd, fat, sb.FATEntryCount * sizeof(*fat));
-    // write root directory to virtual disk file
-    write(vs_fd, root, sb.directoryEntryCount * sizeof(*root));
+    // write superblock to virtual disk file using write_block()
+    if (write_block(&sb, 0) == -1)
+    {
+        perror("Error writing superblock to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
+        return -1;
+    }
+
+    // write FAT to virtual disk file using write_block()
+    if (write_block(fat, 1) == -1)
+    {
+        perror("Error writing FAT to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
+        return -1;
+    }
+
+    // write root directory to virtual disk file using write_block()
+    if (write_block(root, 2) == -1)
+    {
+        perror("Error writing root directory to virtual disk");
+        free(fat);
+        free(root);
+        close(vs_fd);
+        return -1;
+    }
     
     fsync (vs_fd); // synchronize kernel file cache with the disk
     close (vs_fd);
+
+    // free memory
+    free(fat);
+    free(root);
     return (0);
 }
 
@@ -314,52 +394,65 @@ int vsread(int fd, void *buf, int n){
         return -1;
     }
 
-    // Find the directory entry for the file
-    int directoryEntry = -1;
-    for (int i = 0; i < sb.directoryEntryCount; i++) {
-        if (strcmp(root[i].filename, openFiles[fd].filename) == 0) {
-            directoryEntry = i;
-            break;
-        }
-    }
-
-    // Check if file was found
-    if (directoryEntry == -1) {
-        printf("Error: File not found\n");
-        return -1;
-    }
-
-    // Check if the file is open in read mode
+    // Check if the data can be read from the file
     if (openFiles[fd].mode != 0) {
         printf("Error: File not open in read mode\n");
         return -1;
     }
 
-    // Read the data from the file
+    // Trace the FATEntry chain for the file and go to the block where the read should start
+    int block = root[fd].firstBlock;
     int bytesRead = 0;
-    int block = root[directoryEntry].firstBlock;
     char blockData[sb.blockSize];
-    while (bytesRead < n && block != -1) {
-        read_block(block, blockData);
-        int bytesToRead = MIN(n - bytesRead, sb.blockSize - openFiles[fd].position);
-        memcpy(buf + bytesRead, blockData + openFiles[fd].position, bytesToRead);
-        bytesRead += bytesToRead;
+    while (block != -1 && bytesRead < n) {
+        // Calculate the block number and offset
+        int blockNumber = openFiles[fd].position / sb.blockSize;
+        int offset = openFiles[fd].position % sb.blockSize;
+
+        // Read the block from the virtual disk
+
+        read_block(block, 0);
+
+        // Read the data from the block
+        int bytesToRead = MIN(n - bytesRead, sb.blockSize - offset);
+        memcpy(buf + bytesRead, blockData + offset, bytesToRead);
+
+        // Update the file position
         openFiles[fd].position += bytesToRead;
-        if (openFiles[fd].position == sb.blockSize) {
-            openFiles[fd].position = 0;
-            block = fat[block].next;
-        }
+        bytesRead += bytesToRead;
+
+        // Go to the next block
+        block = fat[block].next;
     }
 
     return bytesRead;
 }
 
-
+//write to the end) new data to the file. The parameter fd is the
+//file descriptor. The parameter buf is pointing to (i.e., is the address of) a static
+//array holding the data or a dynamically allocated memory space holding the
+//data. The parameter n is the size of the data to write (append) into the file. In
+//case of an error, the function returns −1. Otherwise, it returns the number of
+//bytes successfully appended.
 int vsappend(int fd, void *buf, int n)
 {
-    // Check if file descriptor is valid
+    // Check if file descriptor is valid,
     if (fd < 0 || fd >= MAX_OPEN_FILES || openFiles[fd].filename[0] == '\0') {
         printf("Error: Invalid file descriptor\n");
+        return -1;
+    }
+
+    // Check if the file is open in append mode
+    if (openFiles[fd].mode != 1) {
+        printf("Error: File not open in append mode\n");
+        return -1;
+    }
+
+    int blocksNeeded = (n + BLOCKSIZE - 1) / BLOCKSIZE;
+
+    // Check if there are enough free blocks
+    if (blocksNeeded > sb.freeBlockCount) {
+        printf("Error: Not enough free blocks\n");
         return -1;
     }
 
@@ -378,42 +471,33 @@ int vsappend(int fd, void *buf, int n)
         return -1;
     }
 
-    // Check if the file is open in write mode
-    if (openFiles[fd].mode != 1) {
-        printf("Error: File not open in write mode\n");
-        return -1;
-    }
-
-    // Append the data to the file
+    //Write the data to the file
     int bytesWritten = 0;
     int block = root[directoryEntry].firstBlock;
     char blockData[sb.blockSize];
-    while (bytesWritten < n) {
-        if (block == -1 || openFiles[fd].position == sb.blockSize) {
-            //Assign a new block to the file
-            int newBlock = sb.firstFreeBlock;
-            if (newBlock == -1) {
-                printf("Error: No free blocks\n");
-                break;
-            }
-            if (block != -1) {
-                fat[block].next = newBlock;
-            } else {
-                root[directoryEntry].firstBlock = newBlock;
-            }
-            block = newBlock;
-            openFiles[fd].position = 0;
-            sb.firstFreeBlock = fat[newBlock].next;
-        }
-        int bytesToWrite = MIN(n - bytesWritten, sb.blockSize - openFiles[fd].position);
-        memcpy(blockData + openFiles[fd].position, buf + bytesWritten, bytesToWrite);
-        write_block(block, blockData);
-        bytesWritten += bytesToWrite;
-        openFiles[fd].position += bytesToWrite;
-    }
+    while(bytesWritten < n){
+        //Calculate the block number and offset
+        int blockNumber = openFiles[fd].position / sb.blockSize;
+        int offset = openFiles[fd].position % sb.blockSize;
 
-    root[directoryEntry].size += bytesWritten;
-    return bytesWritten;
+        // Write the data to the block
+        int bytesToWrite = MIN(n - bytesWritten, sb.blockSize - offset);
+        read_block(block, blockData);
+        memcpy(blockData + offset, buf + bytesWritten, bytesToWrite);
+
+        // Write the block to the virtual disk
+        write_block(blockData, block);
+
+        // Update the file size
+        if (openFiles[fd].position + bytesToWrite > root[directoryEntry].size) {
+            root[directoryEntry].size = openFiles[fd].position + bytesToWrite;
+        }
+
+        // Update the file position
+        openFiles[fd].position += bytesToWrite;
+        bytesWritten += bytesToWrite;
+    }
+    return 1;
 }
 
 int vsdelete(char *filename)
@@ -456,4 +540,3 @@ int vsdelete(char *filename)
 
     return 0;
 }
-
