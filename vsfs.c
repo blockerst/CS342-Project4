@@ -10,22 +10,26 @@
 #define MAX_OPEN_FILES 16
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
+//From 0 superblock
 struct superblock {
     int blockSize;
     int blockCount;
-    int freeBlockCount;
-    int reservedBlockCount;
-    int firstFreeBlock;
-    int directoryEntryCount;
+    int padding[2012];
     int FATEntryCount;
-    int firstFreeDirectoryEntry;
+    int firstFreeBlock;
+    int freeBlockCount;
     int firstFreeFATEntry;
+    int reservedBlockCount;
+    int directoryEntryCount;
+    int firstFreeDirectoryEntry;
 };
 
+//From 1 to 32
 struct FATentry{
     int next;
 };
 
+//From 33 to 41
 struct directoryEntry{
     char filename[31];
     int size;
@@ -98,6 +102,10 @@ int vsformat(char *vdiskname, unsigned int m)
     size = num << m;
     count = size / BLOCKSIZE;
 
+    sprintf (command, "dd if=/dev/zero of=%s bs=%d count=%d",vdiskname, BLOCKSIZE, count);
+    //printf ("executing command = %s\n", command);
+    system (command);
+
     // Open the virtual disk file
     vs_fd = open(vdiskname, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
     if (vs_fd == -1)
@@ -153,24 +161,30 @@ int vsformat(char *vdiskname, unsigned int m)
         return -1;
     }
 
-    // Write the FAT table to the virtual disk file
-    if (write_block(fat, 1) == -1)
+    // Write the FAT table to the virtual disk file 32 times
+    for (int i = 0; i < 32; i++)
     {
-        perror("Error writing FAT to virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+        if (write_block(fat, i + 1) == -1)
+        {
+            perror("Error writing FAT to virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
-
+    
+    //33-41 root directory
     // Write the root directory to the virtual disk file
-    if (write_block(root, 2) == -1)
-    {
-        perror("Error writing root directory to virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+    for (int i = 0; i < 9; i++){
+        if (write_block(root, i + 33) == -1)
+        {
+            perror("Error writing root directory to virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
 
     // Close the virtual disk file
@@ -211,23 +225,28 @@ int vsmount(char *vdiskname)
     }
 
     // Read the FAT table from the virtual disk file
-    if (read_block(fat, 1) == -1)
+    for (int i = 0; i < 32; i++)
     {
-        perror("Error reading FAT from virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+        if (read_block(fat, i + 1) == -1)
+        {
+            perror("Error reading FAT from virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
-
+    
     // Read the root directory from the virtual disk file
-    if (read_block(root, 2) == -1)
-    {
-        perror("Error reading root directory from virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+    for(int i = 0; i < 9; i++){
+        if (read_block(root, i + 33) == -1)
+        {
+            perror("Error reading root directory from virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
 
     // Initialize the open file table
@@ -254,23 +273,28 @@ int vsumount(){
     }
 
     // write FAT to virtual disk file using write_block()
-    if (write_block(fat, 1) == -1)
+    for (int i = 0; i < 32; i++)
     {
-        perror("Error writing FAT to virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+        if (write_block(fat, i + 1) == -1)
+        {
+            perror("Error writing FAT to virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
 
     // write root directory to virtual disk file using write_block()
-    if (write_block(root, 2) == -1)
-    {
-        perror("Error writing root directory to virtual disk");
-        free(fat);
-        free(root);
-        close(vs_fd);
-        return -1;
+    for(int i = 0; i < 9; i++){
+        if (write_block(root, i + 33) == -1)
+        {
+            perror("Error writing root directory to virtual disk");
+            free(fat);
+            free(root);
+            close(vs_fd);
+            return -1;
+        }
     }
     
     fsync (vs_fd); // synchronize kernel file cache with the disk
@@ -400,62 +424,6 @@ int vsread(int fd, void *buf, int n){
         return -1;
     }
 
-    // Trace the FATEntry chain for the file and go to the block where the read should start
-    int block = root[fd].firstBlock;
-    int bytesRead = 0;
-    char blockData[sb.blockSize];
-    while (block != -1 && bytesRead < n) {
-        // Calculate the block number and offset
-        int blockNumber = openFiles[fd].position / sb.blockSize;
-        int offset = openFiles[fd].position % sb.blockSize;
-
-        // Read the block from the virtual disk
-
-        read_block(block, 0);
-
-        // Read the data from the block
-        int bytesToRead = MIN(n - bytesRead, sb.blockSize - offset);
-        memcpy(buf + bytesRead, blockData + offset, bytesToRead);
-
-        // Update the file position
-        openFiles[fd].position += bytesToRead;
-        bytesRead += bytesToRead;
-
-        // Go to the next block
-        block = fat[block].next;
-    }
-
-    return bytesRead;
-}
-
-//write to the end) new data to the file. The parameter fd is the
-//file descriptor. The parameter buf is pointing to (i.e., is the address of) a static
-//array holding the data or a dynamically allocated memory space holding the
-//data. The parameter n is the size of the data to write (append) into the file. In
-//case of an error, the function returns −1. Otherwise, it returns the number of
-//bytes successfully appended.
-int vsappend(int fd, void *buf, int n)
-{
-    // Check if file descriptor is valid,
-    if (fd < 0 || fd >= MAX_OPEN_FILES || openFiles[fd].filename[0] == '\0') {
-        printf("Error: Invalid file descriptor\n");
-        return -1;
-    }
-
-    // Check if the file is open in append mode
-    if (openFiles[fd].mode != 1) {
-        printf("Error: File not open in append mode\n");
-        return -1;
-    }
-
-    int blocksNeeded = (n + BLOCKSIZE - 1) / BLOCKSIZE;
-
-    // Check if there are enough free blocks
-    if (blocksNeeded > sb.freeBlockCount) {
-        printf("Error: Not enough free blocks\n");
-        return -1;
-    }
-
     // Find the directory entry for the file
     int directoryEntry = -1;
     for (int i = 0; i < sb.directoryEntryCount; i++) {
@@ -471,33 +439,98 @@ int vsappend(int fd, void *buf, int n)
         return -1;
     }
 
-    //Write the data to the file
-    int bytesWritten = 0;
-    int block = root[directoryEntry].firstBlock;
-    char blockData[sb.blockSize];
-    while(bytesWritten < n){
-        //Calculate the block number and offset
-        int blockNumber = openFiles[fd].position / sb.blockSize;
-        int offset = openFiles[fd].position % sb.blockSize;
+    // Read the data from the file
+    int bytesRead = 0;
+    int block_num = root[directoryEntry].firstBlock;
+    while (bytesRead < n && block_num != -1) {
+        // Calculate the block number and offset
+        int offset = openFiles[fd].position % BLOCKSIZE;
 
-        // Write the data to the block
-        int bytesToWrite = MIN(n - bytesWritten, sb.blockSize - offset);
-        read_block(block, blockData);
-        memcpy(blockData + offset, buf + bytesWritten, bytesToWrite);
+        // Read the data from the block
+        char block_data[BLOCKSIZE];
+        read_block(block_data, block_num);
 
-        // Write the block to the virtual disk
-        write_block(blockData, block);
+        // Calculate the number of bytes to read
+        int bytes_to_read = MIN(BLOCKSIZE - offset, n - bytesRead);
 
-        // Update the file size
-        if (openFiles[fd].position + bytesToWrite > root[directoryEntry].size) {
-            root[directoryEntry].size = openFiles[fd].position + bytesToWrite;
+        // Copy the data to the buffer
+        memcpy(buf + bytesRead, block_data + offset, bytes_to_read);
+
+        // Update the file position and the number of bytes read
+        openFiles[fd].position += bytes_to_read;
+        bytesRead += bytes_to_read;
+
+        // Move to the next block
+        block_num = fat[block_num].next;
+    }
+
+    return bytesRead;
+}
+
+//write to the end) new data to the file. The parameter fd is the
+//file descriptor. The parameter buf is pointing to (i.e., is the address of) a static
+//array holding the data or a dynamically allocated memory space holding the
+//data. The parameter n is the size of the data to write (append) into the file. In
+//case of an error, the function returns −1. Otherwise, it returns the number of
+//bytes successfully appended.
+int vsappend(int fd, void *buf, int n)
+{
+    // Check if file descriptor is valid
+    if (fd < 0 || fd >= MAX_OPEN_FILES || openFiles[fd].filename[0] == '\0') {
+        printf("Error: Invalid file descriptor\n");
+        return -1;
+    }
+
+    // Check if the file is open in append mode
+    if (openFiles[fd].mode != MODE_APPEND) {
+        printf("Error: File not open in append mode\n");
+        return -1;
+    }
+
+    // Calculate the number of blocks needed
+    int blocks_needed = (n + BLOCKSIZE - 1) / BLOCKSIZE;
+
+    // Check if there are enough free blocks
+    if (blocks_needed > sb.freeBlockCount) {
+        printf("Error: Not enough free space\n");
+        return -1;
+    }
+
+    // Write the data to the file
+    int bytes_written = 0;
+    while (bytes_written < n) {
+        // Calculate the block number and offset
+        int block_num = openFiles[fd].position / BLOCKSIZE + 3; // +3 to account for sb, fat, and root
+        int offset = openFiles[fd].position % BLOCKSIZE;
+
+        // If we're at the start of a block, we need to allocate a new block
+        if (offset == 0) {
+            int new_block = sb.firstFreeBlock;
+            sb.firstFreeBlock = fat[new_block].next;
+            fat[new_block].next = -1;
+            
+            block_num = new_block;
         }
 
-        // Update the file position
-        openFiles[fd].position += bytesToWrite;
-        bytesWritten += bytesToWrite;
+        // Write the data to the block
+        int bytes_to_write = MIN(BLOCKSIZE - offset, n - bytes_written);
+
+        // Read the current block data
+        char block_data[BLOCKSIZE];
+        read_block(block_data, block_num);
+
+        // Append the new data to the block data
+        memcpy(block_data + offset, buf + bytes_written, bytes_to_write);
+
+        // Write the updated block data back to the block
+        write_block(block_data, block_num);
+
+        // Update the file position and the number of bytes written
+        openFiles[fd].position += bytes_to_write;
+        bytes_written += bytes_to_write;
     }
-    return 1;
+
+    return bytes_written;
 }
 
 int vsdelete(char *filename)
